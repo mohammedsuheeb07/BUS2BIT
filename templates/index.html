@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>BUS2BIT | Smart College Bus Tracking</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f1f5f9;
+            color: #172033;
+        }
+
+        header {
+            background: #102a43;
+            color: white;
+            padding: 22px 7%;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 30px;
+        }
+
+        header p {
+            color: #cbd5e1;
+            margin-bottom: 0;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+
+        .panel {
+            background: white;
+            padding: 25px;
+            border-radius: 14px;
+            margin-bottom: 22px;
+        }
+
+        .buttons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 20px;
+        }
+
+        button {
+            border: none;
+            border-radius: 8px;
+            padding: 12px 17px;
+            font-size: 15px;
+            cursor: pointer;
+        }
+
+        .student-btn {
+            background: #087f5b;
+            color: white;
+        }
+
+        .admin-btn {
+            background: #1d4ed8;
+            color: white;
+        }
+
+        .back-btn {
+            background: #e2e8f0;
+            color: #172033;
+        }
+
+        .delete-btn {
+            background: #dc2626;
+            color: white;
+        }
+
+        .add-btn {
+            background: #087f5b;
+            color: white;
+        }
+
+        .bus-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+            gap: 18px;
+        }
+
+        .bus-card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .bus-card h3 {
+            margin-top: 0;
+        }
+
+        .badge {
+            display: inline-block;
+            border-radius: 20px;
+            padding: 6px 10px;
+            font-size: 12px;
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .inactive {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 12px;
+            margin: 7px 0 15px;
+            border: 1px solid #cbd5e1;
+            border-radius: 7px;
+            font-size: 15px;
+        }
+
+        label {
+            font-weight: bold;
+        }
+
+        .notice {
+            background: #e0f2fe;
+            padding: 15px;
+            border-radius: 9px;
+            line-height: 1.6;
+            margin-top: 20px;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        #feedback {
+            margin-top: 15px;
+            font-weight: bold;
+        }
+
+        footer {
+            text-align: center;
+            padding: 25px;
+            color: #64748b;
+        }
+    </style>
+</head>
+
+<body>
+
+<header>
+    <h1>🚌 BUS2BIT</h1>
+    <p>Smart College Bus Tracking System</p>
+</header>
+
+<main class="container">
+
+    <!-- HOME PAGE -->
+    <section id="homePage" class="panel">
+        <h2>Welcome to BUS2BIT</h2>
+
+        <p>
+            A smart college bus system designed to help students
+            find their buses and help administrators manage them.
+        </p>
+
+        <div class="buttons">
+            <button class="student-btn" onclick="showStudent()">
+                🎓 Student Mode
+            </button>
+
+            <button class="admin-btn" onclick="showAdmin()">
+                🛠️ Admin Mode
+            </button>
+        </div>
+    </section>
+
+    <!-- STUDENT DASHBOARD -->
+    <section id="studentPage" class="hidden">
+
+        <div class="panel">
+            <h2>🎓 Student Dashboard</h2>
+
+            <p>Find your college bus and check its demonstration status.</p>
+
+            <label for="searchBus">Search by bus number or route</label>
+
+            <input
+                id="searchBus"
+                type="text"
+                placeholder="Example: BUS-01 or Route 1"
+                oninput="loadBuses()"
+            >
+
+            <button class="back-btn" onclick="showHome()">
+                ← Back to Home
+            </button>
+        </div>
+
+        <h2>Available Buses</h2>
+
+        <div id="studentBusList" class="bus-list"></div>
+
+        <div class="notice">
+            <strong>Live tracking:</strong>
+            GPS tracking is not connected yet. Bus locations and
+            arrival times will be added in a later development stage.
+        </div>
+    </section>
+
+    <!-- ADMIN DASHBOARD -->
+    <section id="adminPage" class="hidden">
+
+        <div class="panel">
+            <h2>🛠️ Admin Dashboard</h2>
+
+            <p>Manage the demonstration bus list.</p>
+
+            <button class="back-btn" onclick="showHome()">
+                ← Back to Home
+            </button>
+        </div>
+
+        <div class="panel">
+            <h3>Add a New Bus</h3>
+
+            <form id="addBusForm">
+
+                <label for="busId">Bus Number</label>
+                <input
+                    id="busId"
+                    type="text"
+                    placeholder="Example: BUS-04"
+                    required
+                >
+
+                <label for="route">Route Name</label>
+                <input
+                    id="route"
+                    type="text"
+                    placeholder="Example: College Route 4"
+                    required
+                >
+
+                <label for="status">Bus Status</label>
+                <select id="status">
+                    <option value="Active">Active</option>
+                    <option value="Inactive">Inactive</option>
+                </select>
+
+                <button class="add-btn" type="submit">
+                    + Add Bus
+                </button>
+            </form>
+
+            <p id="feedback"></p>
+        </div>
+
+        <div class="panel">
+            <h3>Manage Registered Buses</h3>
+
+            <div id="adminBusList" class="bus-list"></div>
+        </div>
+
+        <div class="notice">
+            <strong>Development notice:</strong>
+            This is a demonstration admin panel without authentication.
+            Do not expose it to the public or use it for real bus
+            operations until secure login and permissions are implemented.
+        </div>
+    </section>
+
+</main>
+
+<footer>
+    BUS2BIT — Smart College Bus Tracking Project
+</footer>
+
+<script>
+    function showPage(pageId) {
+        document.getElementById("homePage").classList.add("hidden");
+        document.getElementById("studentPage").classList.add("hidden");
+        document.getElementById("adminPage").classList.add("hidden");
+
+        document.getElementById(pageId).classList.remove("hidden");
+    }
+
+    function showHome() {
+        showPage("homePage");
+    }
+
+    function showStudent() {
+        showPage("studentPage");
+        loadBuses();
+    }
+
+    function showAdmin() {
+        showPage("adminPage");
+        loadBuses();
+    }
+
+    async function loadBuses() {
+        const studentList = document.getElementById("studentBusList");
+        const adminList = document.getElementById("adminBusList");
+
+        try {
+            const response = await fetch("/api/buses");
+
+            if (!response.ok) {
+                throw new Error("Unable to load buses.");
+            }
+
+            const buses = await response.json();
+
+            studentList.innerHTML = "";
+            adminList.innerHTML = "";
+
+            const searchText = document
+                .getElementById("searchBus")
+                .value
+                .trim()
+                .toLowerCase();
+
+            const filteredBuses = buses.filter(function(bus) {
+                return (
+                    bus.bus_id.toLowerCase().includes(searchText) ||
+                    bus.route.toLowerCase().includes(searchText)
+                );
+            });
+
+            if (filteredBuses.length === 0) {
+                studentList.textContent = "No matching buses found.";
+            }
+
+            filteredBuses.forEach(function(bus) {
+                const card = document.createElement("article");
+                card.className = "bus-card";
+
+                const title = document.createElement("h3");
+                title.textContent = "🚌 " + bus.bus_id;
+
+                const route = document.createElement("p");
+                route.textContent = "Route: " + bus.route;
+
+                const status = document.createElement("span");
+                status.className = bus.status === "Active"
+                    ? "badge"
+                    : "badge inactive";
+
+                status.textContent = bus.status;
+
+                const tracking = document.createElement("p");
+                tracking.textContent = "GPS: Not connected";
+
+                card.appendChild(title);
+                card.appendChild(route);
+                card.appendChild(status);
+                card.appendChild(tracking);
+
+                studentList.appendChild(card);
+            });
+
+            buses.forEach(function(bus) {
+                const card = document.createElement("article");
+                card.className = "bus-card";
+
+                const title = document.createElement("h3");
+                title.textContent = bus.bus_id;
+
+                const route = document.createElement("p");
+                route.textContent = "Route: " + bus.route;
+
+                const status = document.createElement("p");
+                status.textContent = "Status: " + bus.status;
+
+                const deleteButton = document.createElement("button");
+                deleteButton.className = "delete-btn";
+                deleteButton.textContent = "Remove Bus";
+
+                deleteButton.addEventListener("click", function() {
+                    deleteBus(bus.bus_id);
+                });
+
+                card.appendChild(title);
+                card.appendChild(route);
+                card.appendChild(status);
+                card.appendChild(deleteButton);
+
+                adminList.appendChild(card);
+            });
+
+        } catch (error) {
+            studentList.textContent = "Unable to load buses.";
+            adminList.textContent = "Unable to load buses.";
+        }
+    }
+
+    document
+        .getElementById("addBusForm")
+        .addEventListener("submit", async function(event) {
+            event.preventDefault();
+
+            const feedback = document.getElementById("feedback");
+
+            const bus = {
+                bus_id: document.getElementById("busId").value,
+                route: document.getElementById("route").value,
+                status: document.getElementById("status").value
+            };
+
+            try {
+                const response = await fetch("/api/buses", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(bus)
+                });
+
+                const result = await response.json();
+
+                if (!response.ok) {
+                    feedback.textContent =
+                        result.error || "Unable to add bus.";
+                    return;
+                }
+
+                feedback.textContent = result.message;
+
+                document.getElementById("addBusForm").reset();
+
+                await loadBuses();
+
+            } catch (error) {
+                feedback.textContent =
+                    "Could not connect to the BUS2BIT server.";
+            }
+        });
+
+    async function deleteBus(busId) {
+        const confirmed = confirm(
+            "Are you sure you want to remove " + busId + "?"
+        );
+
+        if (!confirmed) {
+            return;
+        }
+
+        try {
+            const response = await fetch(
+                "/api/buses/" + encodeURIComponent(busId),
+                { method: "DELETE" }
+            );
+
+            const result = await response.json();
+
+            if (!response.ok) {
+                alert(result.error || "Unable to remove bus.");
+                return;
+            }
+
+            document.getElementById("feedback").textContent =
+                result.message;
+
+            await loadBuses();
+
+        } catch (error) {
+            alert("Could not connect to the BUS2BIT server.");
+        }
+    }
+</script>
+
+</body>
+</html>
