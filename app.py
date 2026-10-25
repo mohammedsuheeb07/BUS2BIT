@@ -53,7 +53,33 @@ def initialize_database():
         """, [
             ("BUS-01", "College Route 1", "Active"),
             ("BUS-02", "College Route 2", "Active"),
-            ("BUS-03", "College Route 3", "Inactive")
+            ("BUS-03", "College Route 3", "Active")
+        ("BUS-04", "College Route 4", "Active"),
+        ("BUS-05", "College Route 5", "Active"),
+        ("BUS-06", "College Route 6", "Active"),
+        ("BUS-07", "College Route 7", "Active"),
+        ("BUS-08", "College Route 8", "Active"),
+        ("BUS-09", "College Route 9", "Active"),
+        ("BUS-10", "College Route 10", "Active"),
+        ("BUS-11", "College Route 11", "Active"),
+        ("BUS-12", "College Route 12", "Active"),
+        ("BUS-13", "College Route 13", "Active"),
+        ("BUS-14", "College Route 14", "Active")
+
+    for bus_number, route_name, status in new_buses:
+        existing = connection.execute(
+            "SELECT id FROM buses WHERE bus_number = ?",
+            (bus_number,)
+        ).fetchone()
+
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO buses (bus_number, route_name, status)
+                VALUES (?, ?, ?)
+                """,
+                (bus_number, route_name, status)
+            )
         ])
 
     connection.commit()
