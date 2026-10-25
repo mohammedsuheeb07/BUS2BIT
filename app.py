@@ -65,6 +65,7 @@ def initialize_database():
         ("BUS-12", "College Route 12", "Active"),
         ("BUS-13", "College Route 13", "Active"),
         ("BUS-14", "College Route 14", "Active")
+        ];    
 
     for bus_number, route_name, status in new_buses:
         existing = connection.execute(
