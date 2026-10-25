@@ -240,17 +240,105 @@ def student():
         </article>
         """
 
-    content = f"""
-    <section class="card">
-        <h2>🎓 Student Dashboard</h2>
-        <p>Find your college bus and view its available GPS information.</p>
-        <a class="button gray" href="/">← Back to Home</a>
-    </section>
+```
+content = f"""
+<section class="card">
+    <h2>🎓 Student Dashboard</h2>
+    <p>Find your college bus and view its available GPS information.</p>
+    <a class="button gray" href="/">← Back to Home</a>
+</section>
 
-    <div class="grid">{cards}</div>
-    """
+<section class="card">
+    <h2>🗺️ Live Bus Map</h2>
+    <p id="map-message">Loading bus locations...</p>
+    <div id="bus-map" style="height: 400px; width: 100%; border-radius: 12px;"></div>
+</section>
 
-    return page(content)
+<div class="grid">{cards}</div>
+
+<link rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const map = L.map("bus-map").setView([12.2958, 76.6394], 11);
+
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    const markers = {};
+    const message = document.getElementById("map-message");
+
+    async function refreshBusLocations() {
+        try {
+            const response = await fetch("/api/bus-locations");
+
+            if (!response.ok) {
+                throw new Error("Could not load bus locations");
+            }
+
+            const buses = await response.json();
+            let validLocations = 0;
+
+            buses.forEach(function (bus) {
+                if (bus.latitude == null || bus.longitude == null) {
+                    return;
+                }
+
+                const lat = Number(bus.latitude);
+                const lon = Number(bus.longitude);
+
+                if (!Number.isFinite(lat) || !Number.isFinite(lon) ||
+                    lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+                    return;
+                }
+
+                validLocations++;
+
+                const popup =
+                    "<b>" + String(bus.bus_number) + "</b><br>" +
+                    String(bus.route_name) + "<br>" +
+                    "Status: " + String(bus.status);
+
+                if (markers[bus.bus_number]) {
+                    markers[bus.bus_number]
+                        .setLatLng([lat, lon])
+                        .setPopupContent(popup);
+                } else {
+                    markers[bus.bus_number] =
+                        L.marker([lat, lon]).addTo(map).bindPopup(popup);
+                }
+            });
+
+            message.textContent = validLocations > 0
+                ? validLocations + " bus location(s) available."
+                : "No GPS locations available yet. The map will update automatically.";
+
+            if (validLocations > 0 && !map._busLocationsFitted) {
+                const group = L.featureGroup(Object.values(markers));
+                map.fitBounds(group.getBounds(), {padding: [30, 30]});
+                map._busLocationsFitted = true;
+            }
+        } catch (error) {
+            message.textContent =
+                "Unable to load bus locations. Please try again shortly.";
+            console.error(error);
+        }
+    }
+
+    refreshBusLocations();
+    setInterval(refreshBusLocations, 15000);
+});
+</script>
+"""
+
+return page(content)
+```
+
 
 
 # ---------------- ADMIN MODE ----------------
