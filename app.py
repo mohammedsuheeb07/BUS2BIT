@@ -1,6 +1,6 @@
 import os
 import hmac
-from flask import Flask, request, redirect, url_for, render_template_string
+from flask import Flask, request, redirect, url_for, render_template_string,jsonify
 import sqlite3
 from datetime import datetime
 
@@ -564,6 +564,48 @@ def gps_update():
         "longitude": longitude
     }
 
+# ---------------- BUS MAP DATA API ----------------
+
+@app.route("/api/bus-locations")
+def bus_locations():
+    connection = get_db()
+
+    buses = connection.execute("""
+        SELECT
+            b.bus_number,
+            b.route_name,
+            b.status,
+            g.latitude,
+            g.longitude,
+            g.last_updated
+        FROM buses b
+        LEFT JOIN gps_devices g
+            ON b.bus_number = g.bus_number
+        ORDER BY b.bus_number
+    """).fetchall()
+
+    connection.close()
+
+    results = []
+
+    for bus in buses:
+        results.append({
+            "bus_number": bus["bus_number"],
+            "route_name": bus["route_name"],
+            "status": bus["status"],
+            "latitude": bus["latitude"],
+            "longitude": bus["longitude"],
+            "last_updated": bus["last_updated"]
+        })
+
+    return jsonify(results)
+
+# ---------------- START APPLICATION ----------------
+
+initialize_database()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
 
 # ---------------- START APPLICATION ----------------
 
