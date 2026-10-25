@@ -514,7 +514,7 @@ def gps_update():
     ):
         return {"error": "Unauthorized"}, 401
 
-    data = request.get_json(silent=True) or {}    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True) or {} 
 
     device_id = str(data.get("device_id", "")).strip()
 
