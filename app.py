@@ -53,7 +53,7 @@ def initialize_database():
         """, [
             ("BUS-01", "College Route 1", "Active"),
             ("BUS-02", "College Route 2", "Active"),
-            ("BUS-03", "College Route 3", "Active")
+            ("BUS-03", "College Route 3", "Active"),
             ("BUS-04", "College Route 4", "Active"),
             ("BUS-05", "College Route 5", "Active"),
             ("BUS-06", "College Route 6", "Active"),
