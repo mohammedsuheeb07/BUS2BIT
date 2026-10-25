@@ -1,3 +1,5 @@
+import os
+import hmac
 from flask import Flask, request, redirect, url_for, render_template_string
 import sqlite3
 from datetime import datetime
@@ -504,7 +506,15 @@ def delete_device(device_id):
 
 @app.route("/api/gps-update", methods=["POST"])
 def gps_update():
-    data = request.get_json(silent=True) or {}
+    expected_token = os.environ.get("GPS_UPDATE_TOKEN", "")
+    supplied_token = request.headers.get("X-GPS-Token", "")
+
+    if not expected_token or not hmac.compare_digest(
+        supplied_token, expected_token
+    ):
+        return {"error": "Unauthorized"}, 401
+
+    data = request.get_json(silent=True) or {}    data = request.get_json(silent=True) or {}
 
     device_id = str(data.get("device_id", "")).strip()
 
