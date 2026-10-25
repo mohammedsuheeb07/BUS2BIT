@@ -262,7 +262,7 @@ def student():
 
     <script>
     document.addEventListener("DOMContentLoaded", function () {{
-        const map = L.map("bus-map").setView([12.2958, 76.6394], 11);
+        const map = L.map("bus-map").setView([12.9141, 74.8560], 12);
 
         L.tileLayer("https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png", {{
             maxZoom: 19,
