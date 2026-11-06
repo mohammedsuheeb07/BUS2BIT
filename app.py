@@ -1,8 +1,16 @@
 import os
 import hmac
-from flask import Flask, request, redirect, url_for, render_template_string,jsonify
 import sqlite3
 from datetime import datetime
+
+from flask import (
+    Flask,
+    request,
+    redirect,
+    url_for,
+    render_template_string,
+    jsonify,
+)
 
 app = Flask(__name__)
 
@@ -41,46 +49,29 @@ def initialize_database():
         )
     """)
 
-    # Add demonstration buses only when the new database is empty.
-    count = connection.execute(
-        "SELECT COUNT(*) FROM buses"
-    ).fetchone()[0]
+    # Add BUS-01 through BUS-14 if they do not already exist.
+    # Existing bus routes and statuses are left unchanged.
+    default_buses = [
+        ("BUS-01", "College Route 1", "Active"),
+        ("BUS-02", "College Route 2", "Active"),
+        ("BUS-03", "College Route 3", "Active"),
+        ("BUS-04", "College Route 4", "Active"),
+        ("BUS-05", "College Route 5", "Active"),
+        ("BUS-06", "College Route 6", "Active"),
+        ("BUS-07", "College Route 7", "Active"),
+        ("BUS-08", "College Route 8", "Active"),
+        ("BUS-09", "College Route 9", "Active"),
+        ("BUS-10", "College Route 10", "Active"),
+        ("BUS-11", "College Route 11", "Active"),
+        ("BUS-12", "College Route 12", "Active"),
+        ("BUS-13", "College Route 13", "Active"),
+        ("BUS-14", "College Route 14", "Active"),
+    ]
 
-    if count == 0:
-        connection.executemany("""
-            INSERT INTO buses (bus_number, route_name, status)
-            VALUES (?, ?, ?)
-        """, [
-            ("BUS-01", "College Route 1", "Active"),
-            ("BUS-02", "College Route 2", "Active"),
-            ("BUS-03", "College Route 3", "Active"),
-            ("BUS-04", "College Route 4", "Active"),
-            ("BUS-05", "College Route 5", "Active"),
-            ("BUS-06", "College Route 6", "Active"),
-            ("BUS-07", "College Route 7", "Active"),
-            ("BUS-08", "College Route 8", "Active"),
-            ("BUS-09", "College Route 9", "Active"),
-            ("BUS-10", "College Route 10", "Active"),
-            ("BUS-11", "College Route 11", "Active"),
-            ("BUS-12", "College Route 12", "Active"),
-            ("BUS-13", "College Route 13", "Active"),
-            ("BUS-14", "College Route 14", "Active"),   
-
-    for bus_number, route_name, status in new_buses:
-        existing = connection.execute(
-            "SELECT id FROM buses WHERE bus_number = ?",
-            (bus_number,)
-        ).fetchone()
-
-        if existing is None:
-            connection.execute(
-                """
-                INSERT INTO buses (bus_number, route_name, status)
-                VALUES (?, ?, ?)
-                """,
-                (bus_number, route_name, status)
-            )
-        ])
+    connection.executemany("""
+        INSERT OR IGNORE INTO buses (bus_number, route_name, status)
+        VALUES (?, ?, ?)
+    """, default_buses)
 
     connection.commit()
     connection.close()
@@ -230,13 +221,17 @@ def student():
     connection = get_db()
 
     buses = connection.execute("""
-        SELECT b.*,
-               g.latitude,
-               g.longitude,
-               g.last_updated
+        SELECT
+            b.bus_number,
+            b.route_name,
+            b.status,
+            g.latitude,
+            g.longitude,
+            g.last_updated
         FROM buses b
         LEFT JOIN gps_devices g
-          ON b.bus_number = g.bus_number
+            ON b.bus_number = g.bus_number
+        ORDER BY b.bus_number
     """).fetchall()
 
     connection.close()
@@ -325,10 +320,18 @@ def student():
 
                     validLocations++;
 
-                    const popup =
-                        "<b>" + String(bus.bus_number) + "</b><br>" +
-                        String(bus.route_name) + "<br>" +
-                        "Status: " + String(bus.status);
+                    // Build popup using text nodes to avoid treating
+                    // database values as HTML.
+                    const popup = document.createElement("div");
+                    const busTitle = document.createElement("strong");
+                    busTitle.textContent = String(bus.bus_number);
+                    popup.appendChild(busTitle);
+                    popup.appendChild(document.createElement("br"));
+                    popup.appendChild(document.createTextNode(String(bus.route_name)));
+                    popup.appendChild(document.createElement("br"));
+                    popup.appendChild(document.createTextNode(
+                        "Status: " + String(bus.status)
+                    ));
 
                     if (markers[bus.bus_number]) {{
                         markers[bus.bus_number]
@@ -365,7 +368,7 @@ def student():
     """
 
     return page(content)
-    
+
 
 # ---------------- ADMIN MODE ----------------
 
@@ -434,7 +437,7 @@ def admin():
     content = f"""
     <section class="card">
         <h2>🛠️ Admin Dashboard</h2>
-        <p>Manage demonstration buses and register their GPS devices.</p>
+        <p>Manage buses and register their GPS devices.</p>
         <a class="button gray" href="/">← Back to Home</a>
     </section>
 
@@ -443,11 +446,11 @@ def admin():
 
         <form action="/add-bus" method="post">
             <label>Bus Number</label>
-            <input name="bus_number" placeholder="Example: BUS-04" required>
+            <input name="bus_number" placeholder="Example: BUS-15" required>
 
             <label>Route Name</label>
             <input name="route_name"
-                   placeholder="Example: College Route 4" required>
+                   placeholder="Example: College Route 15" required>
 
             <label>Bus Status</label>
             <select name="status">
@@ -515,7 +518,7 @@ def admin():
 def add_bus():
     bus_number = request.form["bus_number"].strip().upper()
     route_name = request.form["route_name"].strip()
-    status = request.form["status"]
+    status = request.form.get("status", "Active")
 
     if not bus_number or not route_name:
         return "Bus number and route name are required.", 400
@@ -527,7 +530,6 @@ def add_bus():
             INSERT INTO buses (bus_number, route_name, status)
             VALUES (?, ?, ?)
         """, (bus_number, route_name, status))
-
         connection.commit()
 
     except sqlite3.IntegrityError:
@@ -567,6 +569,9 @@ def add_device():
     device_id = request.form["device_id"].strip()
     bus_number = request.form["bus_number"].strip()
 
+    if not device_id:
+        return "GPS device ID is required.", 400
+
     connection = get_db()
 
     bus = connection.execute(
@@ -583,7 +588,6 @@ def add_device():
             INSERT INTO gps_devices (device_id, bus_number)
             VALUES (?, ?)
         """, (device_id, bus_number))
-
         connection.commit()
 
     except sqlite3.IntegrityError:
@@ -614,9 +618,9 @@ def delete_device(device_id):
     return redirect(url_for("admin"))
 
 
-# ---------------- DEMO LOCATION UPDATE ----------------
-# This endpoint is for testing only.
-# Real GPS integration will require device authentication.
+# ---------------- GPS LOCATION UPDATE API ----------------
+# GPS_UPDATE_TOKEN must be configured as a Render environment variable.
+# A tracker or trusted gateway must send this token in X-GPS-Token.
 
 @app.route("/api/gps-update", methods=["POST"])
 def gps_update():
@@ -626,25 +630,27 @@ def gps_update():
     if not expected_token or not hmac.compare_digest(
         supplied_token, expected_token
     ):
-        return {"error": "Unauthorized"}, 401
+        return jsonify({"error": "Unauthorized"}), 401
 
-    data = request.get_json(silent=True) or {} 
-
+    data = request.get_json(silent=True) or {}
     device_id = str(data.get("device_id", "")).strip()
 
     try:
         latitude = float(data["latitude"])
         longitude = float(data["longitude"])
     except (KeyError, TypeError, ValueError):
-        return {
+        return jsonify({
             "error": "Provide numeric latitude and longitude."
-        }, 400
+        }), 400
 
     if not (-90 <= latitude <= 90):
-        return {"error": "Latitude must be between -90 and 90."}, 400
+        return jsonify({"error": "Latitude must be between -90 and 90."}), 400
 
     if not (-180 <= longitude <= 180):
-        return {"error": "Longitude must be between -180 and 180."}, 400
+        return jsonify({"error": "Longitude must be between -180 and 180."}), 400
+
+    if not device_id:
+        return jsonify({"error": "GPS device ID is required."}), 400
 
     connection = get_db()
 
@@ -655,7 +661,7 @@ def gps_update():
 
     if not device:
         connection.close()
-        return {"error": "GPS device is not registered."}, 404
+        return jsonify({"error": "GPS device is not registered."}), 404
 
     connection.execute("""
         UPDATE gps_devices
@@ -671,12 +677,13 @@ def gps_update():
     connection.commit()
     connection.close()
 
-    return {
-        "message": "Demo location saved successfully.",
+    return jsonify({
+        "message": "Location saved successfully.",
         "device_id": device_id,
         "latitude": latitude,
         "longitude": longitude
-    }
+    })
+
 
 # ---------------- BUS MAP DATA API ----------------
 
@@ -714,15 +721,10 @@ def bus_locations():
 
     return jsonify(results)
 
-# ---------------- START APPLICATION ----------------
-
-initialize_database()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
 
 # ---------------- START APPLICATION ----------------
 
+# Run database setup once when the application starts.
 initialize_database()
 
 if __name__ == "__main__":
