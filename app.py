@@ -325,9 +325,25 @@ td,th{text-align:left;padding:10px 7px;border-bottom:1px solid #e8eee9;vertical-
 <div><label>Status</label><select name="status"><option>Active</option><option>Inactive</option></select></div>
 </div><p><button type="submit">Add bus</button></p></form>
 <table><thead><tr><th>Bus</th><th>Route</th><th>Status</th><th>Action</th></tr></thead><tbody>
-{% for bus in buses %}<tr><td>{{ bus['bus_number'] }}</td><td>{{ bus['route_name'] }}</td><td>{{ bus['status'] }}</td><td>
+{% for bus in buses %}<tr>
+<td>{{ bus['bus_number'] }}</td><td>{{ bus['route_name'] }}</td><td>{{ bus['status'] }}</td>
+<td>
+<details>
+<summary class="button">Edit</summary>
+<form method="post" action="{{ url_for('edit_bus', bus_id=bus['id']) }}" style="min-width:190px;margin-top:10px">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+<label>Bus number</label><input name="bus_number" value="{{ bus['bus_number'] }}" required>
+<label>Route name</label><input name="route_name" value="{{ bus['route_name'] }}" required>
+<label>Status</label><select name="status">
+<option value="Active" {% if bus['status'] == 'Active' %}selected{% endif %}>Active</option>
+<option value="Inactive" {% if bus['status'] == 'Inactive' %}selected{% endif %}>Inactive</option>
+</select>
+<button type="submit" style="margin-top:9px">Save changes</button>
+</form>
+</details>
 <form class="inline" method="post" action="{{ url_for('delete_bus', bus_id=bus['id']) }}" onsubmit="return confirm('Delete this bus?')">
-<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button class="danger" type="submit">Delete</button></form></td></tr>{% endfor %}
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button class="danger" type="submit">Delete</button></form>
+</td></tr>{% endfor %}
 </tbody></table></section>
 
 <section class="card"><h2>GPS device management</h2>
@@ -408,6 +424,57 @@ def add_bus():
             flash("Bus added successfully.")
         except sqlite3.IntegrityError:
             flash("That bus number already exists.")
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/edit-bus/<int:bus_id>", methods=["POST"])
+@admin_required
+def edit_bus(bus_id):
+    require_csrf()
+    bus_number = request.form.get("bus_number", "").strip().upper()
+    route_name = request.form.get("route_name", "").strip()
+    status = request.form.get("status", "Active").strip()
+
+    if not bus_number or not route_name:
+        flash("Enter both bus number and route name.")
+        return redirect(url_for("admin_dashboard"))
+
+    if status not in ("Active", "Inactive"):
+        flash("Choose a valid bus status.")
+        return redirect(url_for("admin_dashboard"))
+
+    try:
+        with get_db() as db:
+            existing = db.execute(
+                "SELECT bus_number FROM buses WHERE id = ?", (bus_id,)
+            ).fetchone()
+            if not existing:
+                flash("Bus not found.")
+                return redirect(url_for("admin_dashboard"))
+
+            old_bus_number = existing["bus_number"]
+            duplicate = db.execute(
+                "SELECT id FROM buses WHERE bus_number = ? AND id != ?",
+                (bus_number, bus_id)
+            ).fetchone()
+            if duplicate:
+                flash("Another bus already uses that bus number.")
+                return redirect(url_for("admin_dashboard"))
+
+            db.execute(
+                "UPDATE buses SET bus_number = ?, route_name = ?, status = ? WHERE id = ?",
+                (bus_number, route_name, status, bus_id)
+            )
+            if old_bus_number != bus_number:
+                db.execute(
+                    "UPDATE gps_devices SET bus_number = ? WHERE bus_number = ?",
+                    (bus_number, old_bus_number)
+                )
+            db.commit()
+        flash("Bus details updated successfully.")
+    except sqlite3.IntegrityError:
+        flash("That bus number is already in use.")
+
     return redirect(url_for("admin_dashboard"))
 
 
