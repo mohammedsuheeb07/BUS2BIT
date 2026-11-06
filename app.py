@@ -1,7 +1,10 @@
 import os
 import hmac
+import html
+import secrets
 import sqlite3
 from datetime import datetime
+from functools import wraps
 
 from flask import (
     Flask,
@@ -10,17 +13,27 @@ from flask import (
     url_for,
     render_template_string,
     jsonify,
+    session,
 )
 
 app = Flask(__name__)
 
 DATABASE = "bus2bit_v2.db"
 
+# Set SECRET_KEY in Render. A temporary key is used only if it is missing;
+# sessions will reset whenever the app restarts until a permanent key is set.
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = (
+    os.environ.get("COOKIE_SECURE", "false").lower() == "true"
+)
+
 
 # ---------------- DATABASE ----------------
 
 def get_db():
-    connection = sqlite3.connect(DATABASE)
+    connection = sqlite3.connect(DATABASE, timeout=20)
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -49,8 +62,7 @@ def initialize_database():
         )
     """)
 
-    # Add BUS-01 through BUS-14 if they do not already exist.
-    # Existing bus routes and statuses are left unchanged.
+    # Ensure BUS-01 through BUS-14 exist. Existing records are not overwritten.
     default_buses = [
         ("BUS-01", "College Route 1", "Active"),
         ("BUS-02", "College Route 2", "Active"),
@@ -77,6 +89,40 @@ def initialize_database():
     connection.close()
 
 
+# ---------------- COMMON SECURITY HELPERS ----------------
+
+def get_csrf_token():
+    if "_csrf_token" not in session:
+        session["_csrf_token"] = secrets.token_hex(32)
+    return session["_csrf_token"]
+
+
+def csrf_field():
+    # Token is generated from hexadecimal characters, so it is safe in this value.
+    token = get_csrf_token()
+    return f'<input type="hidden" name="csrf_token" value="{token}">'
+
+
+def valid_csrf_token():
+    supplied = request.form.get("csrf_token", "")
+    expected = session.get("_csrf_token", "")
+    return bool(expected) and hmac.compare_digest(supplied, expected)
+
+
+def admin_required(function):
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        if not session.get("is_admin"):
+            return redirect(url_for("admin_login"))
+
+        if request.method == "POST" and not valid_csrf_token():
+            return "Security check failed. Refresh the page and try again.", 400
+
+        return function(*args, **kwargs)
+
+    return wrapper
+
+
 # ---------------- COMMON PAGE DESIGN ----------------
 
 PAGE = """
@@ -85,9 +131,12 @@ PAGE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#102747">
     <title>BUS2BIT | Smart College Bus Tracking</title>
 
     <style>
+        * { box-sizing: border-box; }
+
         body {
             margin: 0;
             font-family: Arial, sans-serif;
@@ -115,6 +164,7 @@ PAGE = """
             margin-bottom: 20px;
             border-radius: 12px;
             box-shadow: 0 3px 12px #0000000d;
+            overflow-x: auto;
         }
 
         .grid {
@@ -141,6 +191,7 @@ PAGE = """
             color: white;
             text-decoration: none;
             cursor: pointer;
+            font-size: 14px;
         }
 
         .green { background: #16804a; }
@@ -151,6 +202,7 @@ PAGE = """
             width: 100%;
             border-collapse: collapse;
             background: white;
+            min-width: 520px;
         }
 
         th, td {
@@ -172,6 +224,8 @@ PAGE = """
         }
 
         .muted { color: #64748b; }
+        .top-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+        form.inline-form { display: inline; }
     </style>
 </head>
 
@@ -203,15 +257,81 @@ def home():
     <section class="card">
         <h2>Welcome to BUS2BIT</h2>
         <p>
-            Find college buses and help administrators manage buses
+            Find college buses and help authorised administrators manage buses
             and their dedicated GPS devices.
         </p>
 
-        <a class="button green" href="/student">🎓 Student Mode</a>
-        <a class="button" href="/admin">🛠️ Admin Mode</a>
+        <div class="top-actions">
+            <a class="button green" href="/student">🎓 Student Mode</a>
+            <a class="button" href="/admin">🛠️ Admin Mode</a>
+        </div>
     </section>
     """
     return page(content)
+
+
+# ---------------- ADMIN LOGIN AND LOGOUT ----------------
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    if session.get("is_admin"):
+        return redirect(url_for("admin"))
+
+    error = ""
+
+    if request.method == "POST":
+        if not valid_csrf_token():
+            return "Security check failed. Refresh the page and try again.", 400
+
+        expected_username = os.environ.get("ADMIN_USERNAME", "admin")
+        expected_password = os.environ.get("ADMIN_PASSWORD", "")
+
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+
+        if not expected_password:
+            return "Admin password is not configured in the server environment.", 503
+
+        username_ok = hmac.compare_digest(username, expected_username)
+        password_ok = hmac.compare_digest(password, expected_password)
+
+        if username_ok and password_ok:
+            session.clear()
+            session["is_admin"] = True
+            get_csrf_token()
+            return redirect(url_for("admin"))
+
+        error = "Incorrect username or password."
+
+    content = f"""
+    <section class="card">
+        <h2>🔐 Admin Login</h2>
+        <p class="muted">Authorised administrators only.</p>
+        <p style="color:#c63737;">{html.escape(error)}</p>
+
+        <form method="post" action="/admin/login">
+            {csrf_field()}
+            <label>Username</label>
+            <input name="username" autocomplete="username" required>
+
+            <label>Password</label>
+            <input name="password" type="password"
+                   autocomplete="current-password" required>
+
+            <button class="green" type="submit">Login</button>
+        </form>
+
+        <p><a href="/">← Back to Home</a></p>
+    </section>
+    """
+    return page(content)
+
+
+@app.route("/admin/logout", methods=["POST"])
+@admin_required
+def admin_logout():
+    session.clear()
+    return redirect(url_for("home"))
 
 
 # ---------------- STUDENT MODE ----------------
@@ -239,23 +359,28 @@ def student():
     cards = ""
 
     for bus in buses:
-        location = "GPS location not available yet"
+        bus_number = html.escape(str(bus["bus_number"]))
+        route_name = html.escape(str(bus["route_name"]))
+        status = html.escape(str(bus["status"]))
 
+        location = "GPS location not available yet"
         if bus["latitude"] is not None and bus["longitude"] is not None:
             location = (
-                f'Latitude: {bus["latitude"]}, '
-                f'Longitude: {bus["longitude"]}'
+                f'Latitude: {html.escape(str(bus["latitude"]))}, '
+                f'Longitude: {html.escape(str(bus["longitude"]))}'
             )
+
+        last_updated = html.escape(
+            str(bus["last_updated"] or "No location received")
+        )
 
         cards += f"""
         <article class="card">
-            <h3>🚌 {bus['bus_number']}</h3>
-            <p>Route: {bus['route_name']}</p>
-            <p>Status: {bus['status']}</p>
+            <h3>🚌 {bus_number}</h3>
+            <p>Route: {route_name}</p>
+            <p>Status: {status}</p>
             <p>{location}</p>
-            <p class="muted">
-                Last update: {bus['last_updated'] or 'No location received'}
-            </p>
+            <p class="muted">Last update: {last_updated}</p>
         </article>
         """
 
@@ -320,8 +445,6 @@ def student():
 
                     validLocations++;
 
-                    // Build popup using text nodes to avoid treating
-                    // database values as HTML.
                     const popup = document.createElement("div");
                     const busTitle = document.createElement("strong");
                     busTitle.textContent = String(bus.bus_number);
@@ -373,6 +496,7 @@ def student():
 # ---------------- ADMIN MODE ----------------
 
 @app.route("/admin")
+@admin_required
 def admin():
     connection = get_db()
 
@@ -389,14 +513,20 @@ def admin():
     bus_rows = ""
 
     for bus in buses:
+        bus_id = int(bus["id"])
+        bus_number = html.escape(str(bus["bus_number"]))
+        route_name = html.escape(str(bus["route_name"]))
+        status = html.escape(str(bus["status"]))
+
         bus_rows += f"""
         <tr>
-            <td>{bus['bus_number']}</td>
-            <td>{bus['route_name']}</td>
-            <td>{bus['status']}</td>
+            <td>{bus_number}</td>
+            <td>{route_name}</td>
+            <td>{status}</td>
             <td>
-                <form action="/delete-bus/{bus['id']}" method="post"
-                      onsubmit="return confirm('Delete this bus?')">
+                <form action="/delete-bus/{bus_id}" method="post"
+                      onsubmit="return confirm('Delete this bus and its assigned GPS device records?')">
+                    {csrf_field()}
                     <button class="red" type="submit">Delete</button>
                 </form>
             </td>
@@ -406,20 +536,30 @@ def admin():
     device_rows = ""
 
     for device in devices:
+        device_id = int(device["id"])
+        shown_device_id = html.escape(str(device["device_id"]))
+        shown_bus_number = html.escape(str(device["bus_number"]))
+        device_status = html.escape(str(device["device_status"]))
+        latitude = (
+            html.escape(str(device["latitude"]))
+            if device["latitude"] is not None else "—"
+        )
+        longitude = (
+            html.escape(str(device["longitude"]))
+            if device["longitude"] is not None else "—"
+        )
+
         device_rows += f"""
         <tr>
-            <td>{device['device_id']}</td>
-            <td>{device['bus_number']}</td>
-            <td>{device['device_status']}</td>
+            <td>{shown_device_id}</td>
+            <td>{shown_bus_number}</td>
+            <td>{device_status}</td>
+            <td>{latitude}</td>
+            <td>{longitude}</td>
             <td>
-                {device['latitude'] if device['latitude'] is not None else '—'}
-            </td>
-            <td>
-                {device['longitude'] if device['longitude'] is not None else '—'}
-            </td>
-            <td>
-                <form action="/delete-device/{device['id']}" method="post"
+                <form action="/delete-device/{device_id}" method="post"
                       onsubmit="return confirm('Delete this GPS device?')">
+                    {csrf_field()}
                     <button class="red" type="submit">Delete</button>
                 </form>
             </td>
@@ -429,22 +569,31 @@ def admin():
     bus_options = ""
 
     for bus in buses:
+        bus_number = html.escape(str(bus["bus_number"]), quote=True)
+        route_name = html.escape(str(bus["route_name"]))
         bus_options += (
-            f'<option value="{bus["bus_number"]}">'
-            f'{bus["bus_number"]} — {bus["route_name"]}</option>'
+            f'<option value="{bus_number}">'
+            f'{bus_number} — {route_name}</option>'
         )
 
     content = f"""
     <section class="card">
         <h2>🛠️ Admin Dashboard</h2>
         <p>Manage buses and register their GPS devices.</p>
-        <a class="button gray" href="/">← Back to Home</a>
+        <div class="top-actions">
+            <a class="button gray" href="/">← Back to Home</a>
+            <form class="inline-form" action="/admin/logout" method="post">
+                {csrf_field()}
+                <button class="red" type="submit">Logout</button>
+            </form>
+        </div>
     </section>
 
     <section class="card">
         <h2>Add a New Bus</h2>
 
         <form action="/add-bus" method="post">
+            {csrf_field()}
             <label>Bus Number</label>
             <input name="bus_number" placeholder="Example: BUS-15" required>
 
@@ -463,7 +612,7 @@ def admin():
     </section>
 
     <section class="card">
-        <h2>Registered Buses</h2>
+        <h2>Registered Buses ({len(buses)})</h2>
 
         <table>
             <tr>
@@ -482,6 +631,7 @@ def admin():
         </p>
 
         <form action="/add-device" method="post">
+            {csrf_field()}
             <label>GPS Device ID</label>
             <input name="device_id"
                    placeholder="Example: GPS-BUS-01" required>
@@ -497,7 +647,7 @@ def admin():
     </section>
 
     <section class="card">
-        <h2>Registered GPS Devices</h2>
+        <h2>Registered GPS Devices ({len(devices)})</h2>
 
         <table>
             <tr>
@@ -515,13 +665,17 @@ def admin():
 # ---------------- ADD BUS ----------------
 
 @app.route("/add-bus", methods=["POST"])
+@admin_required
 def add_bus():
-    bus_number = request.form["bus_number"].strip().upper()
-    route_name = request.form["route_name"].strip()
+    bus_number = request.form.get("bus_number", "").strip().upper()
+    route_name = request.form.get("route_name", "").strip()
     status = request.form.get("status", "Active")
 
     if not bus_number or not route_name:
         return "Bus number and route name are required.", 400
+
+    if status not in ("Active", "Inactive"):
+        return "Invalid bus status.", 400
 
     connection = get_db()
 
@@ -543,6 +697,7 @@ def add_bus():
 # ---------------- DELETE BUS ----------------
 
 @app.route("/delete-bus/<int:bus_id>", methods=["POST"])
+@admin_required
 def delete_bus(bus_id):
     connection = get_db()
 
@@ -565,9 +720,10 @@ def delete_bus(bus_id):
 # ---------------- REGISTER GPS DEVICE ----------------
 
 @app.route("/add-device", methods=["POST"])
+@admin_required
 def add_device():
-    device_id = request.form["device_id"].strip()
-    bus_number = request.form["bus_number"].strip()
+    device_id = request.form.get("device_id", "").strip()
+    bus_number = request.form.get("bus_number", "").strip()
 
     if not device_id:
         return "GPS device ID is required.", 400
@@ -605,6 +761,7 @@ def add_device():
 # ---------------- DELETE GPS DEVICE ----------------
 
 @app.route("/delete-device/<int:device_id>", methods=["POST"])
+@admin_required
 def delete_device(device_id):
     connection = get_db()
 
@@ -724,7 +881,6 @@ def bus_locations():
 
 # ---------------- START APPLICATION ----------------
 
-# Run database setup once when the application starts.
 initialize_database()
 
 if __name__ == "__main__":
