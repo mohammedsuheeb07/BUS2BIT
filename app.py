@@ -3,25 +3,15 @@ import hmac
 import html
 import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import wraps
 
 from flask import (
-    Flask,
-    request,
-    redirect,
-    url_for,
-    render_template_string,
-    jsonify,
-    session,
+    Flask, abort, flash, jsonify, redirect, render_template_string,
+    request, session, url_for
 )
 
 app = Flask(__name__)
-
-DATABASE = "bus2bit_v2.db"
-
-# Set SECRET_KEY in Render. A temporary key is used only if it is missing;
-# sessions will reset whenever the app restarts until a permanent key is set.
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -29,8 +19,18 @@ app.config["SESSION_COOKIE_SECURE"] = (
     os.environ.get("COOKIE_SECURE", "false").lower() == "true"
 )
 
+DATABASE = os.environ.get("DATABASE_PATH", "bus2bit_v2.db")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-# ---------------- DATABASE ----------------
+DEFAULT_BUSES = [
+    (f"BUS-{number:02d}", "Route not assigned", "Active")
+    for number in range(1, 15)
+]
+
+# ---------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------
 
 def get_db():
     connection = sqlite3.connect(DATABASE, timeout=20)
@@ -39,849 +39,514 @@ def get_db():
 
 
 def initialize_database():
-    connection = get_db()
-
-    connection.execute("""
-        CREATE TABLE IF NOT EXISTS buses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bus_number TEXT UNIQUE NOT NULL,
-            route_name TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'Active'
+    with get_db() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS buses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bus_number TEXT UNIQUE NOT NULL,
+                route_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Active'
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS gps_devices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT UNIQUE NOT NULL,
+                bus_number TEXT NOT NULL,
+                device_status TEXT NOT NULL DEFAULT 'Registered',
+                latitude REAL,
+                longitude REAL,
+                last_updated TEXT
+            )
+        """)
+        db.executemany(
+            """INSERT OR IGNORE INTO buses (bus_number, route_name, status)
+               VALUES (?, ?, ?)""",
+            DEFAULT_BUSES
         )
-    """)
-
-    connection.execute("""
-        CREATE TABLE IF NOT EXISTS gps_devices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id TEXT UNIQUE NOT NULL,
-            bus_number TEXT NOT NULL,
-            device_status TEXT NOT NULL DEFAULT 'Registered',
-            latitude REAL,
-            longitude REAL,
-            last_updated TEXT
-        )
-    """)
-
-    # Ensure BUS-01 through BUS-14 exist. Existing records are not overwritten.
-    default_buses = [
-        ("BUS-01", "College Route 1", "Active"),
-        ("BUS-02", "College Route 2", "Active"),
-        ("BUS-03", "College Route 3", "Active"),
-        ("BUS-04", "College Route 4", "Active"),
-        ("BUS-05", "College Route 5", "Active"),
-        ("BUS-06", "College Route 6", "Active"),
-        ("BUS-07", "College Route 7", "Active"),
-        ("BUS-08", "College Route 8", "Active"),
-        ("BUS-09", "College Route 9", "Active"),
-        ("BUS-10", "College Route 10", "Active"),
-        ("BUS-11", "College Route 11", "Active"),
-        ("BUS-12", "College Route 12", "Active"),
-        ("BUS-13", "College Route 13", "Active"),
-        ("BUS-14", "College Route 14", "Active"),
-    ]
-
-    connection.executemany("""
-        INSERT OR IGNORE INTO buses (bus_number, route_name, status)
-        VALUES (?, ?, ?)
-    """, default_buses)
-
-    connection.commit()
-    connection.close()
+        db.commit()
 
 
-# ---------------- COMMON SECURITY HELPERS ----------------
+# ---------------------------------------------------------------------
+# Security helpers
+# ---------------------------------------------------------------------
 
-def get_csrf_token():
-    if "_csrf_token" not in session:
-        session["_csrf_token"] = secrets.token_hex(32)
-    return session["_csrf_token"]
-
-
-def csrf_field():
-    # Token is generated from hexadecimal characters, so it is safe in this value.
-    token = get_csrf_token()
-    return f'<input type="hidden" name="csrf_token" value="{token}">'
+def csrf_token():
+    token = session.get("_csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["_csrf_token"] = token
+    return token
 
 
-def valid_csrf_token():
-    supplied = request.form.get("csrf_token", "")
+def csrf_valid():
+    supplied = request.form.get("_csrf_token", "")
     expected = session.get("_csrf_token", "")
-    return bool(expected) and hmac.compare_digest(supplied, expected)
+    return bool(supplied and expected and hmac.compare_digest(supplied, expected))
+
+
+def require_csrf():
+    if not csrf_valid():
+        abort(400, description="The form expired or could not be verified. Please go back and try again.")
 
 
 def admin_required(function):
     @wraps(function)
-    def wrapper(*args, **kwargs):
+    def decorated(*args, **kwargs):
         if not session.get("is_admin"):
             return redirect(url_for("admin_login"))
-
-        if request.method == "POST" and not valid_csrf_token():
-            return "Security check failed. Refresh the page and try again.", 400
-
         return function(*args, **kwargs)
+    return decorated
 
-    return wrapper
+
+@app.context_processor
+def inject_template_helpers():
+    return {"csrf_token": csrf_token}
 
 
-# ---------------- COMMON PAGE DESIGN ----------------
+# ---------------------------------------------------------------------
+# Student interface - this is the public home page.
+# No Admin Mode link or admin login link is shown here.
+# ---------------------------------------------------------------------
 
-PAGE = """
-<!DOCTYPE html>
+STUDENT_PAGE = r"""
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#102747">
-    <title>BUS2BIT | Smart College Bus Tracking</title>
-
-    <style>
-        * { box-sizing: border-box; }
-
-        body {
-            margin: 0;
-            font-family: Arial, sans-serif;
-            background: #f1f5f9;
-            color: #172033;
-        }
-
-        header {
-            background: #102747;
-            color: white;
-            padding: 24px 7%;
-        }
-
-        header h1 { margin: 0 0 8px; }
-
-        main {
-            max-width: 1100px;
-            margin: 30px auto;
-            padding: 0 20px;
-        }
-
-        .card {
-            background: white;
-            padding: 24px;
-            margin-bottom: 20px;
-            border-radius: 12px;
-            box-shadow: 0 3px 12px #0000000d;
-            overflow-x: auto;
-        }
-
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-            gap: 18px;
-        }
-
-        input, select {
-            box-sizing: border-box;
-            width: 100%;
-            padding: 12px;
-            margin: 7px 0 16px;
-            border: 1px solid #cbd5e1;
-            border-radius: 6px;
-        }
-
-        button, .button {
-            display: inline-block;
-            border: 0;
-            border-radius: 6px;
-            padding: 11px 16px;
-            background: #1769d2;
-            color: white;
-            text-decoration: none;
-            cursor: pointer;
-            font-size: 14px;
-        }
-
-        .green { background: #16804a; }
-        .red { background: #c63737; }
-        .gray { background: #64748b; }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            background: white;
-            min-width: 520px;
-        }
-
-        th, td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #e2e8f0;
-        }
-
-        .message {
-            background: #dcfce7;
-            padding: 12px;
-            border-radius: 6px;
-        }
-
-        footer {
-            text-align: center;
-            padding: 25px;
-            color: #64748b;
-        }
-
-        .muted { color: #64748b; }
-        .top-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-        form.inline-form { display: inline; }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BUS2BIT | College Bus Tracking</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    :root { color-scheme: light; --green:#13834a; --dark:#10251b; --muted:#64746b; --bg:#f4f8f5; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Arial, sans-serif; background:var(--bg); color:var(--dark); }
+    header { background:#fff; border-bottom:1px solid #e3ebe5; padding:15px 5%; display:flex; align-items:center; gap:12px; }
+    .logo { width:42px; height:42px; border-radius:13px; display:grid; place-items:center; background:#e2f5e9; color:var(--green); font-size:23px; }
+    header h1 { margin:0; font-size:21px; }
+    header small { color:var(--muted); }
+    main { max-width:1100px; margin:28px auto; padding:0 16px 35px; }
+    .hero { background:linear-gradient(120deg,#0e7541,#20a65f); color:white; border-radius:22px; padding:26px; }
+    .hero h2 { margin:0 0 8px; font-size:clamp(24px,4vw,34px); }
+    .hero p { margin:0; opacity:.92; }
+    .searchbox { margin-top:20px; display:flex; gap:10px; background:#fff; border-radius:14px; padding:8px; }
+    .searchbox input { min-width:0; flex:1; border:0; outline:0; padding:12px; font-size:16px; color:#173323; }
+    button { border:0; border-radius:10px; background:#117a43; color:#fff; padding:12px 19px; font-weight:bold; cursor:pointer; }
+    .section-title { margin:25px 0 12px; font-size:19px; }
+    #results { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+    .bus-card { background:#fff; border:1px solid #e3ebe5; border-radius:15px; padding:16px; text-align:left; cursor:pointer; color:var(--dark); }
+    .bus-card:hover { border-color:#53ae78; box-shadow:0 4px 15px #163d2510; }
+    .bus-card strong { display:block; font-size:17px; margin-bottom:7px; }
+    .route { color:var(--muted); font-size:14px; }
+    .status { display:inline-block; margin-top:12px; font-size:12px; padding:5px 9px; border-radius:20px; background:#e4f7eb; color:#13753f; }
+    .status.inactive { background:#fce9e9; color:#a32b2b; }
+    #map { height:390px; border-radius:17px; overflow:hidden; border:1px solid #dce7df; background:#e9efeb; }
+    .hint { color:var(--muted); font-size:13px; margin-top:10px; }
+    .empty { background:#fff; border:1px dashed #cbd9cf; border-radius:14px; padding:20px; color:var(--muted); }
+    footer { text-align:center; padding:20px; color:#748078; font-size:12px; }
+    @media(max-width:560px) { .hero { padding:20px; } .searchbox { flex-direction:column; } .searchbox button { width:100%; } #map { height:320px; } }
+  </style>
 </head>
-
 <body>
 <header>
-    <h1>🚌 BUS2BIT</h1>
-    <div>Smart College Bus Tracking System</div>
+  <div class="logo">🚌</div>
+  <div><h1>BUS2BIT</h1><small>BEARYS Institute of Technology</small></div>
 </header>
-
 <main>
-    {{ content|safe }}
-</main>
+  <section class="hero">
+    <h2>Find your college bus</h2>
+    <p>Search your route and check your bus location.</p>
+    <form class="searchbox" id="searchForm">
+      <input id="routeSearch" type="search" placeholder="Enter route name (e.g. Mangaluru)" autocomplete="off">
+      <button type="submit">Search buses</button>
+    </form>
+  </section>
 
-<footer>BUS2BIT — Smart College Bus Tracking Project</footer>
+  <h3 class="section-title">Available buses</h3>
+  <div id="results"><div class="empty">Loading buses…</div></div>
+
+  <h3 class="section-title">Bus location map</h3>
+  <div id="map"></div>
+  <p class="hint">Bus locations refresh automatically every 15 seconds. A bus appears on the map after its GPS device sends a location.</p>
+</main>
+<footer>BUS2BIT · Smart College Bus Tracking System</footer>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  const map = L.map('map').setView([12.9141, 74.8560], 12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  let allBuses = [];
+  const markers = {};
+
+  function safeText(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+      '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+    })[ch]);
+  }
+
+  function renderBuses() {
+    const term = document.getElementById('routeSearch').value.trim().toLowerCase();
+    const filtered = allBuses.filter(bus =>
+      !term ||
+      (bus.route_name || '').toLowerCase().includes(term) ||
+      (bus.bus_number || '').toLowerCase().includes(term)
+    );
+    const results = document.getElementById('results');
+    if (!filtered.length) {
+      results.innerHTML = '<div class="empty">No buses match that route. Check the spelling or try another route name.</div>';
+      return;
+    }
+    results.innerHTML = filtered.map(bus => `
+      <button type="button" class="bus-card" data-bus="${safeText(bus.bus_number)}">
+        <strong>${safeText(bus.bus_number)}</strong>
+        <span class="route">${safeText(bus.route_name || 'Route not assigned')}</span><br>
+        <span class="status ${bus.status === 'Active' ? '' : 'inactive'}">${safeText(bus.status || 'Unknown')}</span>
+        <span class="route">${bus.latitude != null && bus.longitude != null ? ' · GPS location available' : ' · Waiting for GPS'}</span>
+      </button>
+    `).join('');
+    results.querySelectorAll('[data-bus]').forEach(button => {
+      button.addEventListener('click', () => {
+        const selected = allBuses.find(bus => bus.bus_number === button.dataset.bus);
+        if (selected && selected.latitude != null && selected.longitude != null) {
+          map.setView([selected.latitude, selected.longitude], 16);
+          if (markers[selected.bus_number]) markers[selected.bus_number].openPopup();
+        } else {
+          alert('The GPS location for this bus has not been received yet.');
+        }
+      });
+    });
+  }
+
+  async function loadBuses() {
+    try {
+      const response = await fetch('/api/bus-locations', {cache:'no-store'});
+      if (!response.ok) throw new Error('Could not load buses');
+      allBuses = await response.json();
+      allBuses.forEach(bus => {
+        if (bus.latitude == null || bus.longitude == null) return;
+        const position = [bus.latitude, bus.longitude];
+        const popup = `<b>${safeText(bus.bus_number)}</b><br>${safeText(bus.route_name || '')}<br>Updated: ${safeText(bus.last_updated || 'Unknown')}`;
+        if (markers[bus.bus_number]) {
+          markers[bus.bus_number].setLatLng(position).setPopupContent(popup);
+        } else {
+          markers[bus.bus_number] = L.marker(position).addTo(map).bindPopup(popup);
+        }
+      });
+      renderBuses();
+    } catch (error) {
+      document.getElementById('results').innerHTML =
+        '<div class="empty">Unable to load buses right now. Please refresh the page.</div>';
+    }
+  }
+
+  document.getElementById('searchForm').addEventListener('submit', event => {
+    event.preventDefault();
+    renderBuses();
+  });
+  document.getElementById('routeSearch').addEventListener('input', renderBuses);
+  loadBuses();
+  setInterval(loadBuses, 15000);
+</script>
 </body>
 </html>
 """
 
-
-def page(content):
-    return render_template_string(PAGE, content=content)
-
-
-# ---------------- HOME PAGE ----------------
-
 @app.route("/")
 def home():
-    content = """
-    <section class="card">
-        <h2>Welcome to BUS2BIT</h2>
-        <p>
-            Find college buses and help authorised administrators manage buses
-            and their dedicated GPS devices.
-        </p>
-
-        <div class="top-actions">
-            <a class="button green" href="/student">🎓 Student Mode</a>
-            <a class="button" href="/admin">🛠️ Admin Mode</a>
-        </div>
-    </section>
-    """
-    return page(content)
+    return render_template_string(STUDENT_PAGE)
 
 
-# ---------------- ADMIN LOGIN AND LOGOUT ----------------
+@app.route("/student")
+def student():
+    # Keep the old student URL working, but make the public home page the main entry.
+    return redirect(url_for("home"))
+
+
+# ---------------------------------------------------------------------
+# Admin login and dashboard
+# ---------------------------------------------------------------------
+
+LOGIN_PAGE = r"""
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BUS2BIT Admin Login</title>
+<style>
+body{margin:0;background:#f3f7f4;font-family:Arial,sans-serif;display:grid;place-items:center;min-height:100vh;color:#173323}
+.card{background:white;width:min(92%,390px);padding:28px;border-radius:18px;box-shadow:0 8px 35px #17332312}
+h2{margin-top:0}.muted{color:#68776e;font-size:14px}
+label{display:block;margin:16px 0 6px;font-size:14px;font-weight:bold}
+input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #ccd9cf;border-radius:9px;font-size:16px}
+button{margin-top:20px;width:100%;padding:13px;border:0;border-radius:9px;background:#13834a;color:white;font-weight:bold;font-size:15px}
+.error{color:#a22;margin:10px 0}.flash{padding:9px;background:#fcecec;border-radius:8px;margin:8px 0}
+</style></head><body><main class="card">
+<h2>BUS2BIT Admin</h2><p class="muted">Sign in to manage buses and GPS devices.</p>
+{% with messages = get_flashed_messages() %}{% for message in messages %}<div class="flash">{{ message }}</div>{% endfor %}{% endwith %}
+<form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+<label for="username">Username</label><input id="username" name="username" required autocomplete="username">
+<label for="password">Password</label><input id="password" name="password" type="password" required autocomplete="current-password">
+<button type="submit">Login</button>
+</form></main></body></html>
+"""
+
+ADMIN_PAGE = r"""
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BUS2BIT Admin Dashboard</title>
+<style>
+body{margin:0;background:#f4f8f5;color:#173323;font-family:Arial,sans-serif}
+header{background:#fff;padding:16px 5%;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e1e9e3}
+main{max-width:1050px;margin:25px auto;padding:0 15px}
+.card{background:#fff;border:1px solid #e0e9e2;border-radius:15px;padding:18px;margin-bottom:17px}
+h2{margin-top:0}h3{margin-top:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+label{display:block;font-size:13px;margin:10px 0 5px}
+input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd8ce;border-radius:8px}
+button,.button{display:inline-block;border:0;border-radius:8px;background:#13834a;color:white;padding:10px 14px;text-decoration:none;cursor:pointer}
+.danger{background:#a93232}.muted{color:#68776e;font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{text-align:left;padding:10px 7px;border-bottom:1px solid #e8eee9;vertical-align:top}
+.flash{padding:10px;background:#e8f7ed;border-radius:8px;margin:8px 0}
+.inline{display:inline}
+@media(max-width:600px){table{font-size:12px}td,th{padding:8px 4px}}
+</style></head><body>
+<header><div><b>BUS2BIT Admin Dashboard</b><div class="muted">Manage routes, buses and GPS devices</div></div>
+<form method="post" action="{{ url_for('admin_logout') }}"><input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button type="submit">Logout</button></form>
+</header><main>
+{% with messages = get_flashed_messages() %}{% for message in messages %}<div class="flash">{{ message }}</div>{% endfor %}{% endwith %}
+<section class="card"><h2>Bus management</h2>
+<form method="post" action="{{ url_for('add_bus') }}">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+<div class="grid">
+<div><label>Bus number</label><input name="bus_number" placeholder="BUS-15" required></div>
+<div><label>Route name</label><input name="route_name" placeholder="e.g. Mangaluru - Surathkal" required></div>
+<div><label>Status</label><select name="status"><option>Active</option><option>Inactive</option></select></div>
+</div><p><button type="submit">Add bus</button></p></form>
+<table><thead><tr><th>Bus</th><th>Route</th><th>Status</th><th>Action</th></tr></thead><tbody>
+{% for bus in buses %}<tr><td>{{ bus['bus_number'] }}</td><td>{{ bus['route_name'] }}</td><td>{{ bus['status'] }}</td><td>
+<form class="inline" method="post" action="{{ url_for('delete_bus', bus_id=bus['id']) }}" onsubmit="return confirm('Delete this bus?')">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button class="danger" type="submit">Delete</button></form></td></tr>{% endfor %}
+</tbody></table></section>
+
+<section class="card"><h2>GPS device management</h2>
+<form method="post" action="{{ url_for('add_device') }}">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+<div class="grid">
+<div><label>Device ID</label><input name="device_id" placeholder="Enter device ID" required></div>
+<div><label>Assigned bus</label><select name="bus_number" required>{% for bus in buses %}<option value="{{ bus['bus_number'] }}">{{ bus['bus_number'] }} — {{ bus['route_name'] }}</option>{% endfor %}</select></div>
+<div><label>Device status</label><select name="device_status"><option>Registered</option><option>Coming soon</option><option>Inactive</option></select></div>
+</div><p><button type="submit">Register GPS device</button></p></form>
+<table><thead><tr><th>Device ID</th><th>Bus</th><th>Status</th><th>Last update</th><th>Action</th></tr></thead><tbody>
+{% for device in devices %}<tr><td>{{ device['device_id'] }}</td><td>{{ device['bus_number'] }}</td><td>{{ device['device_status'] }}</td>
+<td>{{ device['last_updated'] or 'No GPS update yet' }}</td><td>
+<form class="inline" method="post" action="{{ url_for('delete_device', device_id=device['id']) }}" onsubmit="return confirm('Delete this GPS device?')">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button class="danger" type="submit">Delete</button></form></td></tr>{% endfor %}
+</tbody></table></section>
+<p class="muted">Student tracking page: <a href="{{ url_for('home') }}">Open BUS2BIT</a></p>
+</main></body></html>
+"""
+
 
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     if session.get("is_admin"):
-        return redirect(url_for("admin"))
-
-    error = ""
+        return redirect(url_for("admin_dashboard"))
 
     if request.method == "POST":
-        if not valid_csrf_token():
-            return "Security check failed. Refresh the page and try again.", 400
-
-        expected_username = os.environ.get("ADMIN_USERNAME", "admin")
-        expected_password = os.environ.get("ADMIN_PASSWORD", "")
-
+        require_csrf()
+        if not ADMIN_PASSWORD:
+            abort(503, description="Admin login is not configured. Set ADMIN_PASSWORD in the hosting environment.")
         username = request.form.get("username", "")
         password = request.form.get("password", "")
-
-        if not expected_password:
-            return "Admin password is not configured in the server environment.", 503
-
-        username_ok = hmac.compare_digest(username, expected_username)
-        password_ok = hmac.compare_digest(password, expected_password)
-
+        username_ok = hmac.compare_digest(username, ADMIN_USERNAME)
+        password_ok = hmac.compare_digest(password, ADMIN_PASSWORD)
         if username_ok and password_ok:
             session.clear()
             session["is_admin"] = True
-            get_csrf_token()
-            return redirect(url_for("admin"))
-
-        error = "Incorrect username or password."
-
-    content = f"""
-    <section class="card">
-        <h2>🔐 Admin Login</h2>
-        <p class="muted">Authorised administrators only.</p>
-        <p style="color:#c63737;">{html.escape(error)}</p>
-
-        <form method="post" action="/admin/login">
-            {csrf_field()}
-            <label>Username</label>
-            <input name="username" autocomplete="username" required>
-
-            <label>Password</label>
-            <input name="password" type="password"
-                   autocomplete="current-password" required>
-
-            <button class="green" type="submit">Login</button>
-        </form>
-
-        <p><a href="/">← Back to Home</a></p>
-    </section>
-    """
-    return page(content)
+            session["_csrf_token"] = secrets.token_urlsafe(32)
+            return redirect(url_for("admin_dashboard"))
+        flash("Invalid username or password.")
+    return render_template_string(LOGIN_PAGE)
 
 
 @app.route("/admin/logout", methods=["POST"])
 @admin_required
 def admin_logout():
+    require_csrf()
     session.clear()
     return redirect(url_for("home"))
 
 
-# ---------------- STUDENT MODE ----------------
-
-@app.route("/student")
-def student():
-    connection = get_db()
-
-    buses = connection.execute("""
-        SELECT
-            b.bus_number,
-            b.route_name,
-            b.status,
-            g.latitude,
-            g.longitude,
-            g.last_updated
-        FROM buses b
-        LEFT JOIN gps_devices g
-            ON b.bus_number = g.bus_number
-        ORDER BY b.bus_number
-    """).fetchall()
-
-    connection.close()
-
-    cards = ""
-
-    for bus in buses:
-        bus_number = html.escape(str(bus["bus_number"]))
-        route_name = html.escape(str(bus["route_name"]))
-        status = html.escape(str(bus["status"]))
-
-        location = "GPS location not available yet"
-        if bus["latitude"] is not None and bus["longitude"] is not None:
-            location = (
-                f'Latitude: {html.escape(str(bus["latitude"]))}, '
-                f'Longitude: {html.escape(str(bus["longitude"]))}'
-            )
-
-        last_updated = html.escape(
-            str(bus["last_updated"] or "No location received")
-        )
-
-        cards += f"""
-        <article class="card">
-            <h3>🚌 {bus_number}</h3>
-            <p>Route: {route_name}</p>
-            <p>Status: {status}</p>
-            <p>{location}</p>
-            <p class="muted">Last update: {last_updated}</p>
-        </article>
-        """
-
-    content = f"""
-    <section class="card">
-        <h2>🎓 Student Dashboard</h2>
-        <p>Find your college bus and view its available GPS information.</p>
-        <a class="button gray" href="/">← Back to Home</a>
-    </section>
-
-    <section class="card">
-        <h2>🗺️ Live Bus Map</h2>
-        <p id="map-message">Loading bus locations...</p>
-        <div id="bus-map"
-             style="height: 400px; width: 100%; border-radius: 12px;">
-        </div>
-    </section>
-
-    <div class="grid">{cards}</div>
-
-    <link rel="stylesheet"
-          href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-    <script>
-    document.addEventListener("DOMContentLoaded", function () {{
-        const map = L.map("bus-map").setView([12.9141, 74.8560], 12);
-
-        L.tileLayer("https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png", {{
-            maxZoom: 19,
-            attribution: "&copy; OpenStreetMap contributors"
-        }}).addTo(map);
-
-        const markers = {{}};
-        const message = document.getElementById("map-message");
-
-        async function refreshBusLocations() {{
-            try {{
-                const response = await fetch("/api/bus-locations");
-
-                if (!response.ok) {{
-                    throw new Error("Could not load bus locations");
-                }}
-
-                const buses = await response.json();
-                let validLocations = 0;
-
-                buses.forEach(function (bus) {{
-                    if (bus.latitude == null || bus.longitude == null) {{
-                        return;
-                    }}
-
-                    const lat = Number(bus.latitude);
-                    const lon = Number(bus.longitude);
-
-                    if (!Number.isFinite(lat) || !Number.isFinite(lon) ||
-                        lat < -90 || lat > 90 ||
-                        lon < -180 || lon > 180) {{
-                        return;
-                    }}
-
-                    validLocations++;
-
-                    const popup = document.createElement("div");
-                    const busTitle = document.createElement("strong");
-                    busTitle.textContent = String(bus.bus_number);
-                    popup.appendChild(busTitle);
-                    popup.appendChild(document.createElement("br"));
-                    popup.appendChild(document.createTextNode(String(bus.route_name)));
-                    popup.appendChild(document.createElement("br"));
-                    popup.appendChild(document.createTextNode(
-                        "Status: " + String(bus.status)
-                    ));
-
-                    if (markers[bus.bus_number]) {{
-                        markers[bus.bus_number]
-                            .setLatLng([lat, lon])
-                            .setPopupContent(popup);
-                    }} else {{
-                        markers[bus.bus_number] =
-                            L.marker([lat, lon])
-                                .addTo(map)
-                                .bindPopup(popup);
-                    }}
-                }});
-
-                message.textContent = validLocations > 0
-                    ? validLocations + " bus location(s) available."
-                    : "No GPS locations available yet. Waiting for GPS data.";
-
-                if (validLocations > 0 && !map._busLocationsFitted) {{
-                    const group = L.featureGroup(Object.values(markers));
-                    map.fitBounds(group.getBounds(), {{padding: [30, 30]}});
-                    map._busLocationsFitted = true;
-                }}
-            }} catch (error) {{
-                message.textContent =
-                    "Unable to load bus locations. Please try again shortly.";
-                console.error(error);
-            }}
-        }}
-
-        refreshBusLocations();
-        setInterval(refreshBusLocations, 15000);
-    }});
-    </script>
-    """
-
-    return page(content)
-
-
-# ---------------- ADMIN MODE ----------------
-
 @app.route("/admin")
 @admin_required
-def admin():
-    connection = get_db()
+def admin_dashboard():
+    with get_db() as db:
+        buses = db.execute("SELECT * FROM buses ORDER BY bus_number").fetchall()
+        devices = db.execute("SELECT * FROM gps_devices ORDER BY bus_number").fetchall()
+    return render_template_string(ADMIN_PAGE, buses=buses, devices=devices)
 
-    buses = connection.execute(
-        "SELECT * FROM buses ORDER BY bus_number"
-    ).fetchall()
-
-    devices = connection.execute(
-        "SELECT * FROM gps_devices ORDER BY device_id"
-    ).fetchall()
-
-    connection.close()
-
-    bus_rows = ""
-
-    for bus in buses:
-        bus_id = int(bus["id"])
-        bus_number = html.escape(str(bus["bus_number"]))
-        route_name = html.escape(str(bus["route_name"]))
-        status = html.escape(str(bus["status"]))
-
-        bus_rows += f"""
-        <tr>
-            <td>{bus_number}</td>
-            <td>{route_name}</td>
-            <td>{status}</td>
-            <td>
-                <form action="/delete-bus/{bus_id}" method="post"
-                      onsubmit="return confirm('Delete this bus and its assigned GPS device records?')">
-                    {csrf_field()}
-                    <button class="red" type="submit">Delete</button>
-                </form>
-            </td>
-        </tr>
-        """
-
-    device_rows = ""
-
-    for device in devices:
-        device_id = int(device["id"])
-        shown_device_id = html.escape(str(device["device_id"]))
-        shown_bus_number = html.escape(str(device["bus_number"]))
-        device_status = html.escape(str(device["device_status"]))
-        latitude = (
-            html.escape(str(device["latitude"]))
-            if device["latitude"] is not None else "—"
-        )
-        longitude = (
-            html.escape(str(device["longitude"]))
-            if device["longitude"] is not None else "—"
-        )
-
-        device_rows += f"""
-        <tr>
-            <td>{shown_device_id}</td>
-            <td>{shown_bus_number}</td>
-            <td>{device_status}</td>
-            <td>{latitude}</td>
-            <td>{longitude}</td>
-            <td>
-                <form action="/delete-device/{device_id}" method="post"
-                      onsubmit="return confirm('Delete this GPS device?')">
-                    {csrf_field()}
-                    <button class="red" type="submit">Delete</button>
-                </form>
-            </td>
-        </tr>
-        """
-
-    bus_options = ""
-
-    for bus in buses:
-        bus_number = html.escape(str(bus["bus_number"]), quote=True)
-        route_name = html.escape(str(bus["route_name"]))
-        bus_options += (
-            f'<option value="{bus_number}">'
-            f'{bus_number} — {route_name}</option>'
-        )
-
-    content = f"""
-    <section class="card">
-        <h2>🛠️ Admin Dashboard</h2>
-        <p>Manage buses and register their GPS devices.</p>
-        <div class="top-actions">
-            <a class="button gray" href="/">← Back to Home</a>
-            <form class="inline-form" action="/admin/logout" method="post">
-                {csrf_field()}
-                <button class="red" type="submit">Logout</button>
-            </form>
-        </div>
-    </section>
-
-    <section class="card">
-        <h2>Add a New Bus</h2>
-
-        <form action="/add-bus" method="post">
-            {csrf_field()}
-            <label>Bus Number</label>
-            <input name="bus_number" placeholder="Example: BUS-15" required>
-
-            <label>Route Name</label>
-            <input name="route_name"
-                   placeholder="Example: College Route 15" required>
-
-            <label>Bus Status</label>
-            <select name="status">
-                <option>Active</option>
-                <option>Inactive</option>
-            </select>
-
-            <button class="green" type="submit">+ Add Bus</button>
-        </form>
-    </section>
-
-    <section class="card">
-        <h2>Registered Buses ({len(buses)})</h2>
-
-        <table>
-            <tr>
-                <th>Bus</th><th>Route</th><th>Status</th><th>Action</th>
-            </tr>
-            {bus_rows}
-        </table>
-    </section>
-
-    <section class="card">
-        <h2>🛰️ Register a GPS Device</h2>
-
-        <p class="muted">
-            Enter the unique ID of a compatible GPS tracker installed in a bus.
-            This registers the device; it does not connect to the hardware yet.
-        </p>
-
-        <form action="/add-device" method="post">
-            {csrf_field()}
-            <label>GPS Device ID</label>
-            <input name="device_id"
-                   placeholder="Example: GPS-BUS-01" required>
-
-            <label>Assign to Bus</label>
-            <select name="bus_number" required>
-                <option value="">Select a bus</option>
-                {bus_options}
-            </select>
-
-            <button type="submit">+ Register GPS Device</button>
-        </form>
-    </section>
-
-    <section class="card">
-        <h2>Registered GPS Devices ({len(devices)})</h2>
-
-        <table>
-            <tr>
-                <th>Device ID</th><th>Bus</th><th>Status</th>
-                <th>Latitude</th><th>Longitude</th><th>Action</th>
-            </tr>
-            {device_rows}
-        </table>
-    </section>
-    """
-
-    return page(content)
-
-
-# ---------------- ADD BUS ----------------
 
 @app.route("/add-bus", methods=["POST"])
 @admin_required
 def add_bus():
+    require_csrf()
     bus_number = request.form.get("bus_number", "").strip().upper()
     route_name = request.form.get("route_name", "").strip()
-    status = request.form.get("status", "Active")
-
+    status = request.form.get("status", "Active").strip()
     if not bus_number or not route_name:
-        return "Bus number and route name are required.", 400
+        flash("Enter both bus number and route name.")
+    else:
+        try:
+            with get_db() as db:
+                db.execute(
+                    "INSERT INTO buses (bus_number, route_name, status) VALUES (?, ?, ?)",
+                    (bus_number, route_name, status)
+                )
+                db.commit()
+            flash("Bus added successfully.")
+        except sqlite3.IntegrityError:
+            flash("That bus number already exists.")
+    return redirect(url_for("admin_dashboard"))
 
-    if status not in ("Active", "Inactive"):
-        return "Invalid bus status.", 400
-
-    connection = get_db()
-
-    try:
-        connection.execute("""
-            INSERT INTO buses (bus_number, route_name, status)
-            VALUES (?, ?, ?)
-        """, (bus_number, route_name, status))
-        connection.commit()
-
-    except sqlite3.IntegrityError:
-        connection.close()
-        return "That bus number already exists. Go back and try another.", 400
-
-    connection.close()
-    return redirect(url_for("admin"))
-
-
-# ---------------- DELETE BUS ----------------
 
 @app.route("/delete-bus/<int:bus_id>", methods=["POST"])
 @admin_required
 def delete_bus(bus_id):
-    connection = get_db()
+    require_csrf()
+    with get_db() as db:
+        bus = db.execute("SELECT bus_number FROM buses WHERE id = ?", (bus_id,)).fetchone()
+        if bus:
+            db.execute("DELETE FROM buses WHERE id = ?", (bus_id,))
+            db.execute("DELETE FROM gps_devices WHERE bus_number = ?", (bus["bus_number"],))
+            db.commit()
+            flash("Bus and its linked GPS device records were deleted.")
+    return redirect(url_for("admin_dashboard"))
 
-    bus = connection.execute(
-        "SELECT bus_number FROM buses WHERE id = ?", (bus_id,)
-    ).fetchone()
-
-    if bus:
-        connection.execute(
-            "DELETE FROM gps_devices WHERE bus_number = ?",
-            (bus["bus_number"],)
-        )
-        connection.execute("DELETE FROM buses WHERE id = ?", (bus_id,))
-        connection.commit()
-
-    connection.close()
-    return redirect(url_for("admin"))
-
-
-# ---------------- REGISTER GPS DEVICE ----------------
 
 @app.route("/add-device", methods=["POST"])
 @admin_required
 def add_device():
+    require_csrf()
     device_id = request.form.get("device_id", "").strip()
-    bus_number = request.form.get("bus_number", "").strip()
+    bus_number = request.form.get("bus_number", "").strip().upper()
+    device_status = request.form.get("device_status", "Registered").strip()
+    if not device_id or not bus_number:
+        flash("Enter a device ID and select a bus.")
+    else:
+        try:
+            with get_db() as db:
+                bus_exists = db.execute(
+                    "SELECT 1 FROM buses WHERE bus_number = ?", (bus_number,)
+                ).fetchone()
+                if not bus_exists:
+                    flash("Selected bus was not found.")
+                else:
+                    db.execute(
+                        """INSERT INTO gps_devices (device_id, bus_number, device_status)
+                           VALUES (?, ?, ?)""",
+                        (device_id, bus_number, device_status)
+                    )
+                    db.commit()
+                    flash("GPS device registered successfully.")
+        except sqlite3.IntegrityError:
+            flash("That device ID is already registered.")
+    return redirect(url_for("admin_dashboard"))
 
-    if not device_id:
-        return "GPS device ID is required.", 400
-
-    connection = get_db()
-
-    bus = connection.execute(
-        "SELECT bus_number FROM buses WHERE bus_number = ?",
-        (bus_number,)
-    ).fetchone()
-
-    if not bus:
-        connection.close()
-        return "Please select a valid bus.", 400
-
-    try:
-        connection.execute("""
-            INSERT INTO gps_devices (device_id, bus_number)
-            VALUES (?, ?)
-        """, (device_id, bus_number))
-        connection.commit()
-
-    except sqlite3.IntegrityError:
-        connection.close()
-        return (
-            "This GPS device ID is already registered. "
-            "Go back and enter a unique ID.",
-            400
-        )
-
-    connection.close()
-    return redirect(url_for("admin"))
-
-
-# ---------------- DELETE GPS DEVICE ----------------
 
 @app.route("/delete-device/<int:device_id>", methods=["POST"])
 @admin_required
 def delete_device(device_id):
-    connection = get_db()
-
-    connection.execute(
-        "DELETE FROM gps_devices WHERE id = ?", (device_id,)
-    )
-
-    connection.commit()
-    connection.close()
-
-    return redirect(url_for("admin"))
+    require_csrf()
+    with get_db() as db:
+        db.execute("DELETE FROM gps_devices WHERE id = ?", (device_id,))
+        db.commit()
+    flash("GPS device deleted.")
+    return redirect(url_for("admin_dashboard"))
 
 
-# ---------------- GPS LOCATION UPDATE API ----------------
-# GPS_UPDATE_TOKEN must be configured as a Render environment variable.
-# A tracker or trusted gateway must send this token in X-GPS-Token.
+# ---------------------------------------------------------------------
+# GPS API - provider integration can be added after Tata/MERCYDA access
+# is officially provided. Keep GPS_UPDATE_TOKEN unchanged in Render.
+# ---------------------------------------------------------------------
 
 @app.route("/api/gps-update", methods=["POST"])
 def gps_update():
     expected_token = os.environ.get("GPS_UPDATE_TOKEN", "")
     supplied_token = request.headers.get("X-GPS-Token", "")
-
-    if not expected_token or not hmac.compare_digest(
-        supplied_token, expected_token
-    ):
-        return jsonify({"error": "Unauthorized"}), 401
+    if not expected_token or not supplied_token or not hmac.compare_digest(supplied_token, expected_token):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
 
     data = request.get_json(silent=True) or {}
     device_id = str(data.get("device_id", "")).strip()
-
     try:
-        latitude = float(data["latitude"])
-        longitude = float(data["longitude"])
-    except (KeyError, TypeError, ValueError):
-        return jsonify({
-            "error": "Provide numeric latitude and longitude."
-        }), 400
+        latitude = float(data.get("latitude"))
+        longitude = float(data.get("longitude"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Valid latitude and longitude are required"}), 400
 
-    if not (-90 <= latitude <= 90):
-        return jsonify({"error": "Latitude must be between -90 and 90."}), 400
+    if not device_id or not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+        return jsonify({"success": False, "error": "Invalid device ID or coordinates"}), 400
 
-    if not (-180 <= longitude <= 180):
-        return jsonify({"error": "Longitude must be between -180 and 180."}), 400
+    updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_db() as db:
+        device = db.execute(
+            "SELECT id FROM gps_devices WHERE device_id = ?", (device_id,)
+        ).fetchone()
+        if not device:
+            return jsonify({"success": False, "error": "Device is not registered"}), 404
+        db.execute(
+            """UPDATE gps_devices
+               SET latitude = ?, longitude = ?, last_updated = ?
+               WHERE device_id = ?""",
+            (latitude, longitude, updated_at, device_id)
+        )
+        db.commit()
 
-    if not device_id:
-        return jsonify({"error": "GPS device ID is required."}), 400
-
-    connection = get_db()
-
-    device = connection.execute(
-        "SELECT id FROM gps_devices WHERE device_id = ?",
-        (device_id,)
-    ).fetchone()
-
-    if not device:
-        connection.close()
-        return jsonify({"error": "GPS device is not registered."}), 404
-
-    connection.execute("""
-        UPDATE gps_devices
-        SET latitude = ?, longitude = ?, last_updated = ?
-        WHERE device_id = ?
-    """, (
-        latitude,
-        longitude,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        device_id
-    ))
-
-    connection.commit()
-    connection.close()
-
-    return jsonify({
-        "message": "Location saved successfully.",
-        "device_id": device_id,
-        "latitude": latitude,
-        "longitude": longitude
-    })
+    return jsonify({"success": True, "message": "GPS location updated"})
 
 
-# ---------------- BUS MAP DATA API ----------------
-
-@app.route("/api/bus-locations")
+@app.route("/api/bus-locations", methods=["GET"])
 def bus_locations():
-    connection = get_db()
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT
+                b.bus_number,
+                b.route_name,
+                b.status,
+                g.latitude,
+                g.longitude,
+                g.last_updated
+            FROM buses b
+            LEFT JOIN gps_devices g ON g.bus_number = b.bus_number
+            ORDER BY b.bus_number
+        """).fetchall()
 
-    buses = connection.execute("""
-        SELECT
-            b.bus_number,
-            b.route_name,
-            b.status,
-            g.latitude,
-            g.longitude,
-            g.last_updated
-        FROM buses b
-        LEFT JOIN gps_devices g
-            ON b.bus_number = g.bus_number
-        ORDER BY b.bus_number
-    """).fetchall()
-
-    connection.close()
-
-    results = []
-
-    for bus in buses:
-        results.append({
-            "bus_number": bus["bus_number"],
-            "route_name": bus["route_name"],
-            "status": bus["status"],
-            "latitude": bus["latitude"],
-            "longitude": bus["longitude"],
-            "last_updated": bus["last_updated"]
-        })
-
-    return jsonify(results)
+    return jsonify([
+        {
+            "bus_number": row["bus_number"],
+            "route_name": row["route_name"],
+            "status": row["status"],
+            "latitude": row["latitude"],
+            "longitude": row["longitude"],
+            "last_updated": row["last_updated"],
+        }
+        for row in rows
+    ])
 
 
-# ---------------- START APPLICATION ----------------
+@app.errorhandler(400)
+def bad_request(error):
+    return (
+        "<h2>Request could not be verified</h2>"
+        "<p>The form may have expired. Go back, refresh the page, and try again.</p>",
+        400
+    )
 
+
+# Initialize tables on startup. Existing bus/device rows are retained.
 initialize_database()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=False)
